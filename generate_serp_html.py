@@ -148,7 +148,7 @@ def fill_one_result(result: Tag, url: str, title: str, snippet: str, source_name
 
 
 
-def render_serp(template_path: Path, out_path: Path, query: str, sources_df: pd.DataFrame) -> None:
+def render_serp(template_path: Path, out_path: Path, query: str, sources_df: pd.DataFrame, n_sources) -> None:
     raw = template_path.read_text(encoding="utf-8", errors="ignore")
     raw = fix_asset_paths(raw)
 
@@ -172,7 +172,8 @@ def render_serp(template_path: Path, out_path: Path, query: str, sources_df: pd.
         sources_df = sources_df.sort_values(sort_cols, ascending=True, na_position="last")
 
     # Keep it reasonable like a SERP
-    sources_df = sources_df.head(10)
+    # sources_df = sources_df.head(10)
+    sources_df = sources_df.head(min(8, n_sources))
 
     for _, row in sources_df.iterrows():
         url = str(row.get("source_url", "")).strip()
@@ -196,6 +197,7 @@ def main() -> None:
     ap.add_argument("--template", default="serp_template.html")
     ap.add_argument("--retrievals", default="full_samples/retrievals.csv")
     ap.add_argument("--sources", default="full_samples/serps.csv", help="CSV of sources (supports aio_sources.csv or serps.csv schema)")
+    ap.add_argument("--aio_sources", default="full_samples/aio_sources.csv")
     ap.add_argument("--out_dir", default="full_samples_serp")
     ap.add_argument("--limit", type=int, default=0, help="0 = all; else first N retrieval rows")
     args = ap.parse_args()
@@ -243,10 +245,20 @@ def main() -> None:
 
     src_groups = {str(rid): df for rid, df in src.groupby("retrieval_id", dropna=False)}
 
+    ## Count of results to return 
+    aio_sources = pd.read_csv(Path(args.aio_sources))
+    aio_retr = pd.merge(retr,
+             aio_sources[['retrieval_id', 'aio_sources_id']],
+             how = "left",
+             on = "retrieval_id")
+    n_aio_sources = aio_retr.groupby('retrieval_id')['aio_sources_id'].nunique().reset_index()
+    n_aio_sources_dict = dict(zip(n_aio_sources['retrieval_id'], n_aio_sources['aio_sources_id']))
+
     rendered = 0
     for _, row in retr.iterrows():
         rid = str(row["retrieval_id"])
         q = format_query(row)
+        n_sources = n_aio_sources_dict[row['retrieval_id']]
 
         sources_df = src_groups.get(rid)
         if sources_df is None or sources_df.empty:
@@ -254,7 +266,7 @@ def main() -> None:
             sources_df = src.head(0)
 
         out_path = out_dir / f"{rid}.html"
-        render_serp(template_path, out_path, q, sources_df)
+        render_serp(template_path, out_path, q, sources_df, n_sources)
         rendered += 1
 
     print(f"Rendered {rendered} SERP HTML file(s) to: {out_dir.resolve()}")
