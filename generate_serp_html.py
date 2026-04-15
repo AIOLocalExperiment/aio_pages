@@ -194,9 +194,9 @@ def render_serp(template_path: Path, out_path: Path, query: str, sources_df: pd.
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--template", default="serp_template.html")
-    ap.add_argument("--retrievals", default="pilot_samples_v3_2026/retrievals.csv")
-    ap.add_argument("--sources", default="pilot_samples_v3_2026/serps.csv", help="CSV of sources (supports aio_sources.csv or serps.csv schema)")
-    ap.add_argument("--out_dir", default="pilot_v3_serp")
+    ap.add_argument("--retrievals", default="full_samples/retrievals.csv")
+    ap.add_argument("--sources", default="full_samples/serps.csv", help="CSV of sources (supports aio_sources.csv or serps.csv schema)")
+    ap.add_argument("--out_dir", default="full_samples_serp")
     ap.add_argument("--limit", type=int, default=0, help="0 = all; else first N retrieval rows")
     args = ap.parse_args()
 
