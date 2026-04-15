@@ -234,9 +234,9 @@ def render_serp(template_path: Path,
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--template", default="serp_template.html")
-    ap.add_argument("--retrievals", default="pilot_samples_v3_2026/retrievals.csv")
-    ap.add_argument("--sources", default="pilot_samples_v3_2026/aio_sources.csv")
-    ap.add_argument("--out_dir", default="pilot_v3_aio_as_serp")
+    ap.add_argument("--retrievals", default="full_samples/retrievals.csv")
+    ap.add_argument("--aio_sources", default="full_samples/aio_sources.csv")
+    ap.add_argument("--out_dir", default="full_samples_aio_as_serp")
     ap.add_argument("--limit", type=int, default=0, help="0 = all; else first N retrieval rows")
     args = ap.parse_args()
 
@@ -245,11 +245,11 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     retr = pd.read_csv(Path(args.retrievals))
-    src = pd.read_csv(Path(args.sources))
+    aio_sources = pd.read_csv(Path(args.aio_sources))
     
     ## Count of results to return 
     aio_retr = pd.merge(retr,
-             src[['retrieval_id', 'aio_sources_id']],
+             aio_sources[['retrieval_id', 'aio_sources_id']],
              how = "left",
              on = "retrieval_id")
     n_aio_sources = aio_retr.groupby('retrieval_id')['aio_sources_id'].nunique().reset_index()
@@ -258,7 +258,7 @@ def main() -> None:
 
     if "retrieval_id" not in retr.columns:
         raise RuntimeError("retrievals.csv must have a retrieval_id column")
-    if "retrieval_id" not in src.columns:
+    if "retrieval_id" not in aio_sources.columns:
         raise RuntimeError("aio_sources.csv must have a retrieval_id column")
 
     # If you only want rows where aio_presence==1, uncomment:
@@ -267,7 +267,7 @@ def main() -> None:
     if args.limit and args.limit > 0:
         retr = retr.head(args.limit)
 
-    src_groups = {str(rid): df for rid, df in src.groupby("retrieval_id", dropna=False)}
+    aio_source_groups = {str(rid): df for rid, df in aio_sources.groupby("retrieval_id", dropna=False)}
 
     rendered = 0
     for _, row in retr.iterrows():
@@ -275,10 +275,10 @@ def main() -> None:
         n_sources = n_aio_sources_dict[row['retrieval_id']]
         q = format_query(row)
 
-        sources_df = src_groups.get(rid)
+        sources_df = aio_source_groups.get(rid)
         if sources_df is None or sources_df.empty:
             # still write a page, just with no results
-            sources_df = src.head(0)
+            sources_df = aio_sources.head(0)
 
         out_path = out_dir / f"{rid}.html"
         render_serp(template_path, out_path, q, sources_df, n_sources)
