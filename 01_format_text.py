@@ -4,12 +4,17 @@ from openai import OpenAI
 import sys
 
 # export OPENAI_API_KEY="YOUR_KEY"
-# python 01_format_text.py
+# python 01_format_text.py --sample=5
 
-INPUT_CSV = "pilot_samples_v3_2026/retrievals.csv"
-OUTPUT_CSV = "pilot_samples_v3_2026/retrievals_formatted.csv"
+INPUT_CSV = "full_samples/retrievals.csv"
+OUTPUT_CSV = "full_samples/retrievals_formatted.csv"
 
 DEV = """
+You are a text formatter. 
+Your only job is to add HTML structure to plain text so it visually resembles a Google AI Overview snippet. 
+You never rewrite, reorder, add, or delete any words from the input. 
+Formatting tags and whitespace are the only permitted additions.
+
 You format text into an HTML fragment to be inserted inside:
 <p class="T286Pc">{HERE}</p>
 
@@ -18,6 +23,48 @@ Output ONLY the HTML fragment for {HERE}. Do NOT include <p>, <html>, <body>, <d
 Allowed tags only: <br>, <b>, <ul>, <ol>, <li>, <h3>, <h4>.
 No attributes. No markdown.
 """
+
+# USR = """
+# Format the INPUT TEXT below into a structured HTML snippet resembling a Google AI Overview layout.
+
+# ## Allowed HTML Tags
+# `<h2>`, `<h3>`, `<p>`, `<ul>`, `<li>`, `<strong>`
+
+# ## Rules
+
+# ### Content Integrity
+# - Do not rephrase, reorder, add, or delete any words or punctuation from the input.
+# - The original text must appear in full, in its original order, inside the output HTML.
+
+# ### Headings (`<h2>`, `<h3>`)
+# Apply a heading tag when ALL of these conditions are true:
+# 1. The phrase is short (roughly 8 words or fewer).
+# 2. It ends with a colon, question mark, or stands alone on its own line.
+# 3. It is immediately followed by a list or a new paragraph.
+
+# Examples of valid headings: "Key Takeaways", "Who is eligible?", "In Summary:"
+# Do not wrap full sentences or long clauses in heading tags.
+
+# ### Lists (`<ul>`, `<li>`)
+# Convert consecutive sentences into a list when they follow one of these patterns:
+# - Each sentence begins with a short label followed by a colon (e.g., "Eligibility: You must be…").
+# - A sequence of short, parallel sentences that logically enumerate items.
+
+# Do not force unrelated sentences into a list just because they are adjacent.
+
+# ### Bold (`<strong>`)
+# - Inside a `<li>`, if the item starts with a short label (1–4 words) followed by a colon, wrap ONLY that label in `<strong>`. Leave everything after the colon unbolded.
+# - Never bold full sentences, full list items, or labels longer than 4 words.
+# - Ignore colons that appear mid-sentence or are part of normal grammar (e.g., "users who: registered early").
+
+# ### Spacing and Line Breaks
+# - Each paragraph is its own `<p>` tag. Do not insert blank lines between any block-level elements (`<p>`, `<ul>`, `<h2>`, `<h3>`). Output them on consecutive lines with no blank lines between them.
+# - Do not add space or `<br>` tags between bullet points (`<li>` elements inside the same `<ul>`).
+# - Do not insert line breaks after a heading.
+# - Do NOT add line breaks between bullet points or list items. 
+
+# ## INPUT TEXT:
+# """
 
 USR = """
 Format the INPUT TEXT to resemble a Google AI Overview layout using headings, bullets, bold, spaces, and line breaks.
@@ -69,12 +116,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="gpt-5.2")
     ap.add_argument("--progress-every", type=int, default=1)
+    ap.add_argument("--sample", type=int, default=None)
+
     args = ap.parse_args()
 
     if not os.getenv("OPENAI_API_KEY"):
         raise SystemExit("OPENAI_API_KEY is not set")
 
     df = pd.read_csv(INPUT_CSV)
+    if args.sample:
+        df = df.head(args.sample)
+
     if "aio_text" not in df.columns:
         raise SystemExit(f"Missing column aio_text. Found: {list(df.columns)}")
 
