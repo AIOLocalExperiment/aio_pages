@@ -219,10 +219,11 @@ def render_serp(template_path: Path,
         url = str(row.get("source_url", "")).strip()
         title = str(row.get("source_title", "")).strip()
         snippet = str(row.get("source_text", "")).strip()
-        source_name = (
-            str(row.get("source_name", "")).strip()
-            or str(row.get("root_domain", "")).strip()
-        )
+        source_name = (str(row.get("root_domain", "")).strip())
+        # commenting out the source name option because it is missing for SERP sources
+        # str(row.get("source_name", "")).strip()
+        # or str(row.get("root_domain", "")).strip()
+        
 
         block = copy.deepcopy(template_result)
         fill_one_result(block, url=url, title=title, snippet=snippet, source_name=source_name)
