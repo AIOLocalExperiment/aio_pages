@@ -6,14 +6,88 @@ import copy
 import re
 from pathlib import Path
 from typing import Optional
-
 import pandas as pd
 from bs4 import BeautifulSoup, Tag
+from urllib.parse import urlparse
+import re
 
-# for AIO as serps: python generate_serp_html.py
+# for AIO as SERP: python generate_serp.py
+# for SERP: python generate_serp.py --mode=serp --sources=full_samples/serps.csv
 ASSET_FOLDER_NAME = "html_asset_files"
 
-from urllib.parse import urlparse
+MODE_CONFIG = {
+    "aio_as_serp": {
+        "id":      "aio_sources_id",
+        "url":     "source_url",
+        "title":   "source_title",
+        "snippet": "source_text",
+        "rank":    "source_rank",
+        "name":    "source_name",
+        "domain":  "root_domain",
+        "date":    None,
+        "default_out": "full_samples_aio_as_serp",
+    },
+    "serp": {
+        "id":      "serps_id",
+        "url":     "serps_url",
+        "title":   "serps_title",
+        "snippet": "serps_lede",
+        "rank":    "serps_rank",
+        "name":    "source_name",
+        "domain":  "root_domain",
+        "date":    "serps_date",
+        "default_out": "full_samples_serp",
+    },
+}
+
+def normalize_sources(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    m = MODE_CONFIG[mode]
+    out = pd.DataFrame({
+        "retrieval_id": df["retrieval_id"],
+        "source_id":    df[m["id"]],
+        "source_url":   df[m["url"]],
+        "source_title": df[m["title"]],
+        "source_text":  df[m["snippet"]],
+        "source_rank":  df[m["rank"]],
+        "source_name":  df[m["name"]]   if m["name"]   in df.columns else "",
+        "root_domain":  df[m["domain"]] if m["domain"] in df.columns else "",
+    })
+    if m["date"] and m["date"] in df.columns:
+        out["source_date"] = df[m["date"]]
+    return out
+
+def table_blob_to_googleish_snippet(s: str, max_chars: int = 260) -> str:
+    if not s:
+        return ""
+
+    s = " ".join(str(s).split())
+
+    mt = re.search(r"Table_title:\s*(.*?)(?=\s*Table_content:|\s*$)", s)
+    title = (mt.group(1).strip() if mt else "").strip()
+
+    # ✅ capture the entire pipe row (both cells) before the next "row:"
+    mr = re.search(r"row:\s*(\|.*?\|)\s*(?=row:|$)", s)
+    if not mr:
+        out = re.sub(r"\bTable_(title|content):\s*", "", s)
+        out = re.sub(r"\b(header|row):\s*", "", out).replace("|", " ")
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        out = f"{title} {out}".strip() if title else out
+        return (out[: max_chars - 1].rstrip() + "…") if len(out) > max_chars else out
+
+    cells = [c.strip() for c in mr.group(1).strip().strip("|").split("|") if c.strip()]
+
+    parts = [title] if title else []
+
+    if len(cells) == 2 and (":" in cells[0] and ":" in cells[1]):
+        keys = [k.strip() for k in cells[0].split(":") if k.strip()]
+        vals = [v.strip() for v in cells[1].split(":") if v.strip()]
+        for k, v in zip(keys, vals):
+            parts += [k, v]
+    else:
+        parts.append(" ".join(cells))
+
+    out = re.sub(r"\s{2,}", " ", " ".join(parts).strip())
+    return (out[: max_chars - 1].rstrip() + "…") if len(out) > max_chars else out
 
 def _disable_all_links(soup: BeautifulSoup) -> None:
     for a in soup.find_all("a"):
@@ -31,6 +105,10 @@ def _disable_all_links(soup: BeautifulSoup) -> None:
             style += ";"
         style += "pointer-events:none; cursor:default;"
         a["style"] = style
+
+def _truncate(s: str, n: int) -> str:
+    s = s or ""
+    return s if len(s) <= n else s[: max(0, n - 1)].rstrip() + "…"
 
 def _domain_and_path(url: str, max_path: int = 50) -> tuple[str, str]:
     """
@@ -62,6 +140,17 @@ def _domain(url: str) -> str:
         return d[4:] if d.startswith("www.") else d
     except Exception:
         return ""
+
+def _disable_nav_hover(soup: BeautifulSoup) -> None:
+    """Make the filter tab bar (All / Images / Forums / ...) non-interactive
+    so nothing pops up on hover."""
+    selectors = ("#hdtb", "#hdtb-sc", "div.crJ18e", 'div[role="navigation"]')
+    for sel in selectors:
+        for el in soup.select(sel):
+            style = el.get("style", "")
+            if style and not style.rstrip().endswith(";"):
+                style += ";"
+            el["style"] = style + "pointer-events:none;"
 
 
 def fix_asset_paths(html: str) -> str:
@@ -100,6 +189,8 @@ def find_first_organic_result(rso: Tag) -> Optional[Tag]:
 
 def sanitize(result: Tag) -> None:
     # Make offline-friendly: remove ping + some JS attrs
+    for el in result.select("span.vhJ6Pe"):
+        el.decompose()
     for a in result.find_all("a"):
         if a.has_attr("ping"):
             del a["ping"]
@@ -108,9 +199,13 @@ def sanitize(result: Tag) -> None:
             if t.has_attr(attr):
                 del t[attr]
 
-
 def fill_one_result(result: Tag, url: str, title: str, snippet: str, source_name: str) -> None:
-    display_site = (source_name or "").strip() or _domain(url)
+    # Line 1 (bold): publisher / source name, fall back to domain
+    domain, breadcrumb = _domain_and_path(url)
+    top_line = (source_name or "").strip() or domain
+
+    # Truncate to not overlap with the three vertical dots
+    breadcrumb = _truncate(breadcrumb, 60)   
 
     # Link + title
     a = result.select_one("div.yuRUbf a")
@@ -122,38 +217,41 @@ def fill_one_result(result: Tag, url: str, title: str, snippet: str, source_name
         h3.clear()
         h3.append(title)
 
-    # Website title (THIS is the "Live Science" node in your template)
+    # Line 1: source name (bold)
     for node in result.select("span.VuuXrf"):
         node.clear()
-        node.append(display_site)
+        node.append(top_line)
 
-    # Breadcrumb/display URL line (often shows "https://www.livescience.com › ...")
+    # Line 2: URL / breadcrumb
     tbw = result.select_one("div.TbwUpd")
     if tbw is not None:
         tbw.clear()
-        tbw.append(display_site)
+        tbw.append(breadcrumb)
 
     cite = result.select_one("cite")
     if cite is not None:
         cite.clear()
-        cite.append(display_site)
+        cite.append(breadcrumb)
 
     # Snippet
     sn = result.select_one("div.VwiC3b")
     if sn is not None:
         sn.clear()
-        sn.append((snippet or "").strip())
+        sn.append(table_blob_to_googleish_snippet(snippet))
 
     sanitize(result)
 
-
-
-def render_serp(template_path: Path, out_path: Path, query: str, sources_df: pd.DataFrame, n_sources) -> None:
+def render_serp(template_path: Path, 
+                out_path: Path, 
+                query: str, 
+                sources_df: pd.DataFrame,
+                n_sources) -> None:
     raw = template_path.read_text(encoding="utf-8", errors="ignore")
     raw = fix_asset_paths(raw)
 
     soup = BeautifulSoup(raw, "lxml")
     set_search_query(soup, query)
+    _disable_nav_hover(soup) 
 
     rso = soup.select_one("div#rso")
     if rso is None:
@@ -168,108 +266,78 @@ def render_serp(template_path: Path, out_path: Path, query: str, sources_df: pd.
 
     # Sort by rank if present
     sort_cols = [c for c in ("rank", "source_rank") if c in sources_df.columns]
-    if sort_cols:
-        sources_df = sources_df.sort_values(sort_cols, ascending=True, na_position="last")
+    if "source_rank" in sources_df.columns:
+        sources_df = sources_df.sort_values("source_rank", ascending=True, na_position="last")
 
-    # Keep it reasonable like a SERP
-    # sources_df = sources_df.head(10)
+    # Have same number of sources as AIO (or 8, whichever is lower)
     sources_df = sources_df.head(min(8, n_sources))
 
     for _, row in sources_df.iterrows():
         url = str(row.get("source_url", "")).strip()
         title = str(row.get("source_title", "")).strip()
         snippet = str(row.get("source_text", "")).strip()
-        source_name = (
-            str(row.get("source_name", "")).strip()
-            or str(row.get("root_domain", "")).strip()
-        )
+        source_name = str(row.get("source_name", "")).strip() or str(row.get("root_domain", "")).strip()
+        
 
         block = copy.deepcopy(template_result)
         fill_one_result(block, url=url, title=title, snippet=snippet, source_name=source_name)
         rso.append(block)
-
     _disable_all_links(soup)
     out_path.write_text(str(soup), encoding="utf-8")
 
-
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=list(MODE_CONFIG), default="aio_as_serp")
     ap.add_argument("--template", default="serp_template.html")
     ap.add_argument("--retrievals", default="full_samples/retrievals.csv")
-    ap.add_argument("--sources", default="full_samples/serps.csv", help="CSV of sources (supports aio_sources.csv or serps.csv schema)")
-    ap.add_argument("--aio_sources", default="full_samples/aio_sources.csv")
-    ap.add_argument("--out_dir", default="full_samples_serp")
-    ap.add_argument("--limit", type=int, default=0, help="0 = all; else first N retrieval rows")
+    ap.add_argument("--sources", default=None,
+                    help="Path to aio_sources.csv (mode=aio_as_serp) or serps.csv (mode=serp)")
+    ap.add_argument("--out_dir", default=None)
+    ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
-    template_path = Path(args.template)
-    out_dir = Path(args.out_dir)
+    cfg = MODE_CONFIG[args.mode]
+
+    sources_path = Path(args.sources) if args.sources else Path(
+        "full_samples/aio_sources.csv" if args.mode == "aio_as_serp" else "full_samples/serps.csv"
+    )
+    out_dir = Path(args.out_dir or cfg["default_out"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    template_path = Path(args.template)
     retr = pd.read_csv(Path(args.retrievals))
-    src = pd.read_csv(Path(args.sources))
-    
-    retr = retr.loc[retr.aio_presence == 1]
+    raw_sources = pd.read_csv(sources_path)
+    sources = normalize_sources(raw_sources, args.mode)
 
-
-    # Normalize known source CSV schemas to the columns expected by render_serp().
-    # Expected columns (any subset is fine):
-    #   retrieval_id, source_url, source_title, source_text, source_name/root_domain, rank/source_rank
-    if "serps_url" in src.columns and "source_url" not in src.columns:
-        rename_map = {
-            "serps_url": "source_url",
-            "serps_title": "source_title",
-            "serps_lede": "source_text",
-            "serps_rank": "rank",
-        }
-        src = src.rename(columns={k: v for k, v in rename_map.items() if k in src.columns})
-
-    # Some SERP exports use generic column names; handle a few common variants.
-    if "url" in src.columns and "source_url" not in src.columns:
-        src = src.rename(columns={"url": "source_url"})
-    if "title" in src.columns and "source_title" not in src.columns:
-        src = src.rename(columns={"title": "source_title"})
-    if "snippet" in src.columns and "source_text" not in src.columns:
-        src = src.rename(columns={"snippet": "source_text"})
+    # n_sources per retrieval — now mode-agnostic since we renamed to source_id
+    n_sources_dict = (
+        sources.groupby("retrieval_id")["source_id"].nunique().to_dict()
+    )
 
     if "retrieval_id" not in retr.columns:
         raise RuntimeError("retrievals.csv must have a retrieval_id column")
-    if "retrieval_id" not in src.columns:
-        raise RuntimeError("sources CSV must have a retrieval_id column")
 
-    # If you only want rows where aio_presence==1, uncomment:
-    # retr = retr[retr.get("aio_presence", 0) == 1].copy()
+    # AIO-as-SERP only renders queries where AIO appeared; real SERP mode renders all.
+    if args.mode == "aio_as_serp" and "aio_presence" in retr.columns:
+        retr = retr.loc[retr.aio_presence == 1].copy()
 
     if args.limit and args.limit > 0:
         retr = retr.head(args.limit)
 
-    src_groups = {str(rid): df for rid, df in src.groupby("retrieval_id", dropna=False)}
-
-    ## Count of results to return 
-    aio_sources = pd.read_csv(Path(args.aio_sources))
-    aio_retr = pd.merge(retr,
-             aio_sources[['retrieval_id', 'aio_sources_id']],
-             how = "left",
-             on = "retrieval_id")
-    n_aio_sources = aio_retr.groupby('retrieval_id')['aio_sources_id'].nunique().reset_index()
-    n_aio_sources_dict = dict(zip(n_aio_sources['retrieval_id'], n_aio_sources['aio_sources_id']))
+    source_groups = {str(rid): df for rid, df in sources.groupby("retrieval_id", dropna=False)}
 
     rendered = 0
     for _, row in retr.iterrows():
         rid = str(row["retrieval_id"])
+        n_sources = n_sources_dict.get(row["retrieval_id"], 0)
         q = format_query(row)
-        n_sources = n_aio_sources_dict[row['retrieval_id']]
 
-        sources_df = src_groups.get(rid)
-        if sources_df is None or sources_df.empty:
-            # still write a page, just with no results
-            sources_df = src.head(0)
-
+        sources_df = source_groups.get(rid, sources.head(0))
         out_path = out_dir / f"{rid}.html"
         render_serp(template_path, out_path, q, sources_df, n_sources)
         rendered += 1
 
-    print(f"Rendered {rendered} SERP HTML file(s) to: {out_dir.resolve()}")
+    print(f"[{args.mode}] Rendered {rendered} SERP HTML file(s) to: {out_dir.resolve()}")
 
 
 if __name__ == "__main__":
