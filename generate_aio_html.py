@@ -19,6 +19,7 @@ def _clean_source_snippet(snippet: str) -> str:
     raw = (snippet or "").strip()
     if not raw:
         return ""
+    raw = _strip_markdown_artifacts(raw)
 
     # If it's already plain text (no table markers / pipes), keep it
     if ("Table_title:" not in raw
@@ -87,12 +88,23 @@ def _disable_all_links(soup: BeautifulSoup) -> None:
         style += "pointer-events:none; cursor:default;"
         a["style"] = style
 
+
 def _format_query_from_row(row) -> str:
     q = str(row.get("query", "")).strip()
     q = q.replace("COUNTYSEAT", str(row.get("CountySeat", "")).strip())
     q = q.replace("STATE", str(row.get("State", "")).strip())
     return q
 
+def _disable_nav_hover(soup: BeautifulSoup) -> None:
+    """Make the filter tab bar (All / Images / Forums / ...) non-interactive
+    so nothing pops up on hover."""
+    selectors = ("#hdtb", "#hdtb-sc", "div.crJ18e", 'div[role="navigation"]')
+    for sel in selectors:
+        for el in soup.select(sel):
+            style = el.get("style", "")
+            if style and not style.rstrip().endswith(";"):
+                style += ";"
+            el["style"] = style + "pointer-events:none;"
 
 def _replace_search_bar_query(soup: BeautifulSoup, query: str) -> None:
     # Search bar
@@ -321,6 +333,36 @@ def _replace_sources(soup: BeautifulSoup, aio_container: Tag, sources_df: pd.Dat
 
     ul.replace_with(new_ul)
 
+def _strip_markdown_artifacts(s: str) -> str:
+    """Remove markdown formatting that occasionally leaks into snippet text:
+    bullet markers, bold/italic emphasis, stray heading hashes, and orphan
+    delimiters left behind by truncated snippets."""
+    if not s:
+        return ""
+
+    # 1. Closed bold/italic spans.
+    s = re.sub(r"\*\*([^*\n]+?)\*\*", r"\1", s)
+    s = re.sub(r"__([^_\n]+?)__", r"\1", s)
+    s = re.sub(r"(?<![A-Za-z0-9*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![A-Za-z0-9*])", r"\1", s)
+    s = re.sub(r"(?<![A-Za-z0-9_])_(?=\S)([^_\n]+?)(?<=\S)_(?![A-Za-z0-9_])", r"\1", s)
+
+    # 2. Bullet markers. "*" and "•" are never natural-language tokens, so
+    #    strip them whenever whitespace-bounded, regardless of what precedes
+    #    them. Hyphens and plus signs stay strict (only at punctuation
+    #    boundaries) to avoid eating hyphenated compounds and math.
+    s = re.sub(r"(^|\s)[*\u2022](?=\s)\s*", r"\1", s)
+    s = re.sub(r"(^|(?<=[:.!?])\s)[+\-]\s+", r"\1", s)
+
+    # 3. Orphan delimiters from truncated snippets ("**The Ohio State ...").
+    s = re.sub(r"\*\*", "", s)
+    s = re.sub(r"__", "", s)
+
+    # 4. Stray heading hashes at boundaries.
+    s = re.sub(r"(^|(?<=[:.!?])\s)#{1,6}\s+", r"\1", s)
+
+    # 5. Whitespace tidy.
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
 
 def render_one(template_html_path: Path, out_path: Path, aio_text: str, sources_df: pd.DataFrame, query_str: str) -> None:
     raw_html = template_html_path.read_text(encoding="utf-8", errors="ignore")
@@ -329,6 +371,7 @@ def render_one(template_html_path: Path, out_path: Path, aio_text: str, sources_
     soup = BeautifulSoup(raw_html, "lxml")
 
     _replace_search_bar_query(soup, query_str)
+    _disable_nav_hover(soup) 
 
     aio_container = soup.find(id="eKIzJc")
     if aio_container is None:
@@ -344,9 +387,9 @@ def render_one(template_html_path: Path, out_path: Path, aio_text: str, sources_
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--template", default="aio_template.html", type=str)
-    ap.add_argument("--retrievals", default="full_samples/retrievals_formatted_retry.csv", type=str)
+    ap.add_argument("--retrievals", default="full_samples/retrievals_formatted.csv", type=str)
     ap.add_argument("--sources", default="full_samples/aio_sources.csv", type=str)
-    ap.add_argument("--out_dir", default="full_samples_aio_retry", type=str)
+    ap.add_argument("--out_dir", default="full_samples_aio", type=str)
     ap.add_argument("--limit", default=0, type=int)
     args = ap.parse_args()
 
