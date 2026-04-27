@@ -15,6 +15,25 @@ import re
 # for SERP: python generate_serp.py --mode=serp --sources=full_samples/serps.csv
 ASSET_FOLDER_NAME = "html_asset_files"
 
+def _safe_str(val) -> str:
+    """Return a stripped string for `val`, mapping NaN/None to ''.
+    Without this, `str(float('nan'))` (or `str(pd.NA)`) leaks the literal
+    text 'nan' / '<NA>' into the rendered SERP."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    # Defensive: pandas sometimes round-trips NaN through str() before we get
+    # here (e.g. after .astype(str)). Treat the case-insensitive literals
+    # 'nan' and '<na>' as empty too.
+    if s.lower() in {"nan", "<na>", "none"}:
+        return ""
+    return s
+
 MODE_CONFIG = {
     "aio_as_serp": {
         "id":      "aio_sources_id",
@@ -140,6 +159,9 @@ def _strip_markdown_artifacts(s: str) -> str:
     delimiters left behind by truncated snippets."""
     if not s:
         return ""
+
+    # strip U+FFFC (OBJECT REPLACEMENT)
+    s = re.sub(r'[\ufffc\ufffd]', '', s)
 
     # 1. Closed bold/italic spans.
     s = re.sub(r"\*\*([^*\n]+?)\*\*", r"\1", s)
@@ -304,14 +326,11 @@ def render_serp(template_path: Path,
     sources_df = sources_df.head(min(8, n_sources))
 
     for _, row in sources_df.iterrows():
-        url = str(row.get("source_url", "")).strip()
-        title = str(row.get("source_title", "")).strip()
-        raw_snippet = row.get("source_text", "")
-        raw_snippet = "" if pd.isna(raw_snippet) else str(raw_snippet)
-        snippet = _strip_markdown_artifacts(raw_snippet.strip())
-        source_name = str(row.get("source_name", "")).strip() or str(row.get("root_domain", "")).strip()
+        url = _safe_str(row.get("source_url", ""))
+        title = _safe_str(row.get("source_title", ""))
+        snippet = _strip_markdown_artifacts(_safe_str(row.get("source_text", "")))
+        source_name = _safe_str(row.get("source_name", "")) or _safe_str(row.get("root_domain", ""))
         
-
         block = copy.deepcopy(template_result)
         fill_one_result(block, url=url, title=title, snippet=snippet, source_name=source_name)
         rso.append(block)

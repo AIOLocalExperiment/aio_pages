@@ -6,9 +6,11 @@ import sys
 # export OPENAI_API_KEY="YOUR_KEY"
 # python 01_format_text.py --sample=5 --max-retries=2
 # python 01_format_text.py --retry-from full_samples/retrievals_formatted.csv --max-retries 2
+# python 01_format_text.py --retrieval-id 8f488f66-9c40-48a2-903e-4136c66d66c6 --max-retries 2
 
 INPUT_CSV = "full_samples/retrievals.csv"
 OUTPUT_CSV = "full_samples/retrievals_formatted.csv"
+RETRIEVAL_ID_COL = "retrieval_id"
 
 DEV = """
 You are a strict text-to-HTML formatter. Your job is to add HTML structure
@@ -24,6 +26,9 @@ Allowed tags (no attributes, no other tags ever):
   <h4>      sub-heading inside an <h3> section
   <ul><li>  bulleted list
   <b>       bold a short label inside <li>, or an inline summary lead-in
+  <ol><li>  numbered list — use ONLY when the input itself contains
+            an explicit numeric enumeration ("1. ...  2. ...  3. ...",
+            or "1) ..., 2) ...").
 
 Disallowed: <p>, <br>, <ol>, <strong>, <em>, <hr>, <a>, attributes, classes.
 
@@ -42,13 +47,18 @@ original order, with the SAME punctuation and capitalization.
   for a tag boundary, but you may not delete it outright. Concatenating
   two sentences with no separator (e.g. "marriage.Here's") is a verbatim
   violation.
+- Tag boundaries as visual separators: where the input lacks whitespace
+between two phrases that are clearly distinct (e.g., a parenthetical
+fragment butted against a new capitalized sentence, a colon before a new capitalized sentence),
+inserting a block-level tag boundary like </h3><h4> or </h3><ul>... is allowed
+and preferred over wrapping both phrases together.
 
 # When to wrap text in <h3>
 Wrap a phrase in <h3> if EITHER Pattern A or Pattern B holds.
 
 Pattern A — explicit label / question (current rule):
   All three must be true:
-  1. The phrase is <= 8 words.
+  1. The phrase is <= 15 words.
   2. It already exists in the input verbatim as a standalone label, line,
      or sentence fragment ending in ":" or "?".
   3. It is immediately followed by a list OR by explanatory text that
@@ -56,22 +66,52 @@ Pattern A — explicit label / question (current rule):
   Typical patterns: "Key Takeaways", "Who is eligible?",
   "Key Information and Statistics".
 
-Pattern B — unpunctuated topical fragment at the start of a paragraph:
-  All four must be true:
+Pattern B — unpunctuated topical fragment (start-of-paragraph OR orphan):
+  Rules 1, 2, and 5 must all hold, AND either Rule 3 (start-of-paragraph)
+  OR Rule 4 (orphan-at-end) must hold.
   1. The phrase is <= 8 words and is a NOUN PHRASE with no main verb
      (not a complete sentence, not a clause). Typical shapes:
        "<Topic>'s history", "History of <Topic>", "About <Topic>",
        "Overview of <Topic>", "Background on <Topic>",
-       "Key facts about <Topic>", "<Topic> explained".
-  2. It sits at the very start of a paragraph and is followed
-     immediately by a new capitalized word that begins a self-contained
-     sentence — the fragment is NOT the grammatical subject of what
-     follows. DELETION TEST: if you delete the fragment, the remaining
-     text must still be a complete, coherent paragraph. If deletion
-     breaks the grammar, do NOT wrap.
-  3. The sentence that follows is clearly about the same topic
-     (the topic noun reappears, or the sentence elaborates on it).
-  4. Nothing on the same line precedes the fragment and flows into it.
+       "Key facts about <Topic>", "<Topic> explained",
+       "Key Considerations for <Topic>".
+  2. The fragment is in Title Case — the majority of content words
+     (ignoring short function words like "of", "for", "in", "the",
+     "a", "an", "and", "to", "on", "by") start with a capital letter.
+     Sentence-case fragments ("Key considerations for living in west
+     palm beach") do NOT qualify under Pattern B.
+  3. START-OF-PARAGRAPH position. The fragment sits at the very start
+     of a paragraph and is followed immediately by a new capitalized
+     word that begins a self-contained sentence — the fragment is NOT
+     the grammatical subject of what follows. DELETION TEST: if you
+     delete the fragment, the remaining text must still be a complete,
+     coherent paragraph. The sentence that follows is clearly about
+     the same topic. If deletion breaks the grammar, do NOT wrap.
+  4. ORPHAN-AT-END position. The fragment is preceded by sentence-final
+     punctuation (".", "!", "?") and is followed by the end of the
+     input (or by a paragraph break with nothing further on its topic).
+     This handles the upstream-truncation case where a heading's list
+     was dropped before the formatter ran, leaving a stranded title
+     at the tail of the passage.
+     Example input:
+       "...to more affordable areas. Key Considerations for Living
+        in West Palm Beach"
+     Example output:
+       "...to more affordable areas.<h3>Key Considerations for Living
+        in West Palm Beach</h3>"
+  5. Nothing on the same line precedes the fragment and flows into it.
+
+Pattern C — recognized summary lead-in:
+  If a sentence begins with one of the recognized summary lead-in
+  phrases ("In Summary:", "Verdict:", "Conclusion:", "Bottom Line:",
+  "The Bottom Line:", "Key Takeaway:"), wrap ONLY that lead-in phrase
+  (including the colon) in <h3>, then continue the wrap-up sentence
+  immediately after.
+  Example:
+    Input:  "...enjoying the community's charm. In Summary: It's a
+            relatively peaceful town..."
+    Output: "...enjoying the community's charm.<h3>In Summary:</h3>It's
+            a relatively peaceful town..."
 
 Punctuation belongs INSIDE the heading. If the input phrase ends in
 ":", "?", or "!", that character must appear before </h3>, never after.
@@ -89,11 +129,6 @@ Punctuation belongs INSIDE the heading. If the input phrase ends in
 If you are unsure whether something is Pattern B, leave it unwrapped.
 False headers are worse than missed headers.
 
-Do NOT use <h3> for inline summary lead-ins. Phrases like "In Summary:",
-"Verdict:", "Conclusion:", "Bottom Line:", and "Key Takeaway:" stay inline
-on the same line as the sentence that follows them, and are bolded (see
-<b> rules), not headed.
-
 Use <h4> only for a labeled sub-section nested under an <h3>.
 Most outputs will need zero or one <h3> and no <h4>.
 
@@ -105,28 +140,51 @@ Convert consecutive sentences into a list only if EITHER pattern holds:
 Never list a single sentence. Never split one sentence across multiple <li>.
 Never group unrelated sentences just because they are adjacent.
 
+# When to wrap text in <ol><li>
+Use <ol> only when the input contains an explicit numeric enumeration
+("1. ... 2. ... 3. ..." or "1) ..., 2) ..."). Keep the numeric prefix
+inside the <li> verbatim — never strip it, never add one.
+
+If a numbered item's body contains two or more "Label: text." segments
+after the item's title, split each segment into its own <li> in a
+nested <ul>, with the label bolded per the standard label rule. A new
+sub-field starts wherever a fresh "Label:" appears, even when no
+whitespace separates it from the previous segment in the input.
+
+Example:
+  Input:  "1. Determine Where the Death Occurred Died in NYC
+           (5 Boroughs): Contact NYC Health Department. Died in New
+           York State (Outside NYC): Contact the NYS Department of
+           Health."
+  Output: <ol><li>1. Determine Where the Death Occurred<ul><li><b>Died in NYC (5 Boroughs)</b>: Contact NYC Health Department.</li><li><b>Died in New York State (Outside NYC)</b>: Contact the NYS Department of Health.</li></ul></li></ol>
+
+Never use <ol> for plain prose, never split or merge items.
+
+
 # When to wrap text in <b>
 Use <b> in exactly two situations:
   A) Inside an <li>: if the item begins with a label followed by ":", wrap
      ONLY that label in <b>. The label is everything before the first ":"
      of the item. Labels may include parenthetical qualifiers such as
-     dates, centuries, or short clarifications. 
-     Labels are typically 2-8 words including any parenthetical.
+     dates, centuries, or short clarifications.
+     Labels are typically 2-10 words including any parenthetical.
      Examples:
        <li><b>Eligibility</b>: You must be 18+.</li>
        <li><b>Early Growth (Late 19th Century)</b>: Became a vital rail center.</li>
        <li><b>The Texas Centennial (1936)</b>: The massive exposition...</li>
-     The label should read like a heading or category name — an
-     introductory phrase, not a full clause or sentence. If the colon
-     falls mid-sentence rather than between a label and its content,
-     do not bold. 
+    A label is any phrase of 2–10 words preceding the first : of an <li>,
+    including proper-noun names, place names, and organization names with
+    parenthetical qualifiers. Bold it. The 'mid-sentence colon' exception applies
+    only when the text before : is a complete clause with subject and verb
+    (e.g., 'The bill was signed in 1872:').
+    If the colon falls mid-sentence rather than between a label and its content, do not bold.
   B) Inline summary lead-in: at the start of a sentence or paragraph that
      introduces a wrap-up, wrap ONLY the short lead-in phrase in <b>.
      Leave the colon and the rest unbolded. Recognized lead-ins include
      "In Summary:", "Verdict:", "Conclusion:", "Bottom Line:",
      "Key Takeaway:", "The Bottom Line:", and similar short summary tags
      ending in ":".
-     Example: <b>In Summary</b>: most low-income adults qualify.
+     Example: <h3>In Summary:</h3>most low-income adults qualify.
 Never bold a full sentence or a full <li>. Never use <b> for emphasis on
 arbitrary words mid-sentence.
 
@@ -158,13 +216,19 @@ Verify all four:
      start of a sentence. <b> never wraps a full sentence or full <li>.
   3. Every <h3>/<h4> wraps an existing input phrase of <= 8 words.
   4. No disallowed tag is present.
+  5. If the input contains "1. ... 2. ... 3. ..." or "1) ..., 2) ...",
+   the output uses <ol><li>, not <ul><li>. Each <li> retains the
+   numeric prefix verbatim. Internal "Label:" sub-fields inside an
+   item are nested as <ul><li><b>Label</b>: ...</li></ul>.
 If any check fails, revise before answering.
 """
 
 USR = "Format the INPUT TEXT per your instructions. Output only the HTML fragment.\n\nINPUT TEXT:\n"
 
-# A single few-shot example, sent as alternating user/assistant turns. This
-# is more effective than embedding examples in the system prompt.
+# Few-shot examples, sent as alternating user/assistant turns. This is
+# more effective than embedding examples in the system prompt. Two demos:
+# (1) flat <ul> with bolded labels; (2) <ol> with a nested <ul> of bolded
+# sub-fields inside each numbered item.
 FEWSHOT = [
     {
         "role": "user",
@@ -186,6 +250,37 @@ FEWSHOT = [
             "<li><b>Income</b>: Your household income must be below $50,000.</li>"
             "</ul>"
             "<b>In Summary</b>: most low-income adults qualify."
+        ),
+    },
+    {
+        "role": "user",
+        "content": (
+            "Format the INPUT TEXT per your instructions. Output only the HTML fragment.\n\n"
+            "INPUT TEXT:\n"
+            "1. Determine Where the Death Occurred Died in NYC (5 Boroughs): "
+            "Contact NYC Health Department. Died in New York State (Outside NYC): "
+            "Contact the NYS Department of Health. "
+            "2. Gather Required Documents Proof of Relationship: Birth or marriage "
+            "certificate. Photo ID: Government-issued."
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            "<ol>"
+            "<li>1. Determine Where the Death Occurred"
+            "<ul>"
+            "<li><b>Died in NYC (5 Boroughs)</b>: Contact NYC Health Department.</li>"
+            "<li><b>Died in New York State (Outside NYC)</b>: Contact the NYS Department of Health.</li>"
+            "</ul>"
+            "</li>"
+            "<li>2. Gather Required Documents"
+            "<ul>"
+            "<li><b>Proof of Relationship</b>: Birth or marriage certificate.</li>"
+            "<li><b>Photo ID</b>: Government-issued.</li>"
+            "</ul>"
+            "</li>"
+            "</ol>"
         ),
     },
 ]
@@ -287,9 +382,87 @@ def strip_aio_citation_markup(s: str) -> str:
     s = re.sub(r"\s{2,}", " ", s).strip()
     return s
 
+_MD_EMPH_RE = [
+    re.compile(r'\*\*\s*(.+?)\s*\*\*', re.S),     # **bold**
+    re.compile(r'__\s*(.+?)\s*__',     re.S),     # __bold__
+    re.compile(r'(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])', re.S),  # *italic*
+    re.compile(r'(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])',   re.S),  # _italic_
+]
+
+def strip_md_emphasis(s: str) -> str:
+    """Drop Markdown emphasis markers (**, __, *, _) but keep the wrapped
+    content. AIO captures occasionally leak these, and the formatter's
+    verbatim rule otherwise preserves them as literal asterisks/underscores
+    in the rendered HTML."""
+    if not isinstance(s, str) or not s:
+        return s
+    for pat in _MD_EMPH_RE:
+        s = pat.sub(r'\1', s)
+    return s
+
+# Add a single space between clauses
+_NO_SPACE_BOUNDARY_RE = re.compile(r'([)\]:])([A-Z])')
+
+def insert_missing_clause_boundaries(s: str) -> str:
+    """Insert a newline where a closing paren or bracket is immediately
+    followed by a capitalized word with no whitespace between them.
+
+    Example:
+      'Figures)These figures adjust...' →
+      'Figures)\nThese figures adjust...'
+
+    The newline gives the formatter a clear paragraph boundary to wrap
+    on, rather than fusing both clauses into one overlong <h3>.
+
+    The validator collapses whitespace to a single space when comparing,
+    so this preprocessing step does not produce false validation
+    failures."""
+    if not isinstance(s, str) or not s:
+        return s
+    return _NO_SPACE_BOUNDARY_RE.sub(r'\1\n\2', s)
+
+_SUMMARY_LEADINS = (
+    "In Summary", "In Short", "Verdict", "Conclusion",
+    "Bottom Line", "The Bottom Line", "Key Takeaway", "Key Takeaways",
+    "Overall",
+)
+# Boundary cases we want to split:
+#   "In SummaryCalling..."  → fused to a capital letter
+_FUSED_LEADIN_RE = re.compile(
+    r'\b(' + '|'.join(map(re.escape, _SUMMARY_LEADINS)) + r')(?=[A-Z])'
+)
+
+def split_fused_summary_leadins(s: str) -> str:
+    """Insert a newline after a known summary lead-in when it's
+    immediately followed by a capital letter with no separator.
+    Example: 'In SummaryCalling all of D.C.' →
+             'In Summary\nCalling all of D.C.'
+    The validator collapses whitespace, so this preprocessing
+    step does not produce false validation failures."""
+    if not isinstance(s, str) or not s:
+        return s
+    return _FUSED_LEADIN_RE.sub(r'\1\n', s)
+
+def _filter_to_retrieval_id(df, retrieval_id, source_path):
+    """Filter df to rows whose RETRIEVAL_ID_COL equals retrieval_id.
+    Compares as strings to be robust to int/str CSV parsing differences."""
+    if RETRIEVAL_ID_COL not in df.columns:
+        raise SystemExit(
+            f"--retrieval-id was set, but {source_path} has no "
+            f"'{RETRIEVAL_ID_COL}' column. Found: {list(df.columns)}"
+        )
+    mask = df[RETRIEVAL_ID_COL].astype(str) == str(retrieval_id)
+    matched = df[mask]
+    if matched.empty:
+        raise SystemExit(
+            f"No rows in {source_path} have {RETRIEVAL_ID_COL}={retrieval_id!r}"
+        )
+    return matched
+
 def run_retry(args):
     """Read a previous output CSV, reprocess only rows where valid=False,
-    and write the updated rows back in place."""
+    and write the updated rows back in place. If --retrieval-id is set,
+    restrict to that retrieval id (still skipping rows that are valid)."""
     path = args.retry_from
     df = pd.read_csv(path)
     if "valid" not in df.columns or "aio_text" not in df.columns:
@@ -299,9 +472,28 @@ def run_retry(args):
         )
 
     mask = ~df["valid"].astype(bool).fillna(False)
+    if args.retrieval_id is not None:
+        if RETRIEVAL_ID_COL not in df.columns:
+            raise SystemExit(
+                f"--retrieval-id was set, but {path} has no "
+                f"'{RETRIEVAL_ID_COL}' column. Found: {list(df.columns)}"
+            )
+        id_mask = df[RETRIEVAL_ID_COL].astype(str) == str(args.retrieval_id)
+        if not id_mask.any():
+            raise SystemExit(
+                f"No rows in {path} have {RETRIEVAL_ID_COL}={args.retrieval_id!r}"
+            )
+        mask = mask & id_mask
+
     indices = df.index[mask].tolist()
     if not indices:
-        print(f"No invalid rows in {path}. Nothing to retry.")
+        if args.retrieval_id is not None:
+            print(
+                f"No invalid rows for {RETRIEVAL_ID_COL}={args.retrieval_id!r} "
+                f"in {path}. Nothing to retry."
+            )
+        else:
+            print(f"No invalid rows in {path}. Nothing to retry.")
         return
 
     print(f"Retrying {len(indices)} invalid rows from {path}")
@@ -357,6 +549,14 @@ def main():
         help="Path to a previous output CSV. If set, only rows where "
              "valid=False are reprocessed; the file is updated in place.",
     )
+    ap.add_argument(
+        "--retrieval-id",
+        default=None,
+        help=f"If set, process only the row whose '{RETRIEVAL_ID_COL}' column "
+             f"matches this value. Works with the default flow (single-row "
+             f"output written to OUTPUT_CSV) and with --retry-from (only that "
+             f"id's row is retried, in place).",
+    )
 
     args = ap.parse_args()
 
@@ -369,6 +569,15 @@ def main():
 
     # Strip citation markup (which doesn't render anyway)
     df["aio_text"] = df["aio_text"].apply(strip_aio_citation_markup)
+    df["aio_text"] = df["aio_text"].apply(strip_md_emphasis)
+    df["aio_text"] = df["aio_text"].apply(insert_missing_clause_boundaries)
+    df["aio_text"] = df["aio_text"].apply(split_fused_summary_leadins)
+
+
+    if args.retrieval_id is not None:
+        df = _filter_to_retrieval_id(df, args.retrieval_id, INPUT_CSV)
+        print(f"Filtered to {len(df)} row(s) matching "
+              f"{RETRIEVAL_ID_COL}={args.retrieval_id!r}")
 
     if args.sample:
         df = df.head(args.sample)
