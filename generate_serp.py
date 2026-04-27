@@ -134,6 +134,37 @@ def _domain_and_path(url: str, max_path: int = 50) -> tuple[str, str]:
     except Exception:
         return "", (url or "")
 
+def _strip_markdown_artifacts(s: str) -> str:
+    """Remove markdown formatting that occasionally leaks into snippet text:
+    bullet markers, bold/italic emphasis, stray heading hashes, and orphan
+    delimiters left behind by truncated snippets."""
+    if not s:
+        return ""
+
+    # 1. Closed bold/italic spans.
+    s = re.sub(r"\*\*([^*\n]+?)\*\*", r"\1", s)
+    s = re.sub(r"__([^_\n]+?)__", r"\1", s)
+    s = re.sub(r"(?<![A-Za-z0-9*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![A-Za-z0-9*])", r"\1", s)
+    s = re.sub(r"(?<![A-Za-z0-9_])_(?=\S)([^_\n]+?)(?<=\S)_(?![A-Za-z0-9_])", r"\1", s)
+
+    # 2. Bullet markers. "*" and "•" are never natural-language tokens, so
+    #    strip them whenever whitespace-bounded, regardless of what precedes
+    #    them. Hyphens and plus signs stay strict (only at punctuation
+    #    boundaries) to avoid eating hyphenated compounds and math.
+    s = re.sub(r"(^|\s)[*\u2022](?=\s)\s*", r"\1", s)
+    s = re.sub(r"(^|(?<=[:.!?])\s)[+\-]\s+", r"\1", s)
+
+    # 3. Orphan delimiters from truncated snippets ("**The Ohio State ...").
+    s = re.sub(r"\*\*", "", s)
+    s = re.sub(r"__", "", s)
+
+    # 4. Stray heading hashes at boundaries.
+    s = re.sub(r"(^|(?<=[:.!?])\s)#{1,6}\s+", r"\1", s)
+
+    # 5. Whitespace tidy.
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
+
 def _domain(url: str) -> str:
     try:
         d = urlparse(url).netloc
@@ -275,7 +306,9 @@ def render_serp(template_path: Path,
     for _, row in sources_df.iterrows():
         url = str(row.get("source_url", "")).strip()
         title = str(row.get("source_title", "")).strip()
-        snippet = str(row.get("source_text", "")).strip()
+        raw_snippet = row.get("source_text", "")
+        raw_snippet = "" if pd.isna(raw_snippet) else str(raw_snippet)
+        snippet = _strip_markdown_artifacts(raw_snippet.strip())
         source_name = str(row.get("source_name", "")).strip() or str(row.get("root_domain", "")).strip()
         
 

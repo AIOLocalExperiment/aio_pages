@@ -320,8 +320,9 @@ def _replace_sources(soup: BeautifulSoup, aio_container: Tag, sources_df: pd.Dat
     for _, row in sources_df.iterrows():
         url = str(row.get("source_url", "")).strip()
         title = str(row.get("source_title", "")).strip()
-        snippet = str(row.get("source_text", "")).strip()
-        snippet = _clean_source_snippet(str(row.get("source_text", "")).strip())
+        raw_snippet = row.get("source_text", "")
+        raw_snippet = "" if pd.isna(raw_snippet) else str(raw_snippet)
+        snippet = _clean_source_snippet(raw_snippet.strip())
         source_name = str(row.get("source_name", "")).strip() or str(row.get("root_domain", "")).strip()
 
         li = soup.new_tag("li")
